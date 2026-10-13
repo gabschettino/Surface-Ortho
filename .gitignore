@@ -1,0 +1,46 @@
+# Model data: never commit tiles, meshes or point clouds (they are large and may be confidential).
+tiles/
+*.b3dm
+*.i3dm
+*.pnts
+*.cmpt
+*.glb
+*.gltf
+*.subtree
+*.3sm
+*.3mx
+*.3mxb
+*.las
+*.laz
+*.e57
+*.ply
+*.xyz
+*.pts
+
+# Capture outputs
+out/
+output/
+captures/
+*.png
+!docs/**/*.png
+surfaces*.json
+
+# Secrets and anything token-like
+.env
+.env.*
+*.pem
+*.key
+*token*
+!vendor/stratakit-tokens.css
+*secret*
+*credential*
+config.local.js
+
+# Local tooling
+node_modules/
+.venv/
+__pycache__/
+.DS_Store
+Thumbs.db
+desktop.ini
+.claude/

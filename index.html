@@ -1,0 +1,902 @@
+<!doctype html>
+<html lang="en" data-color-scheme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Surface Ortho Capture</title>
+<!-- CesiumJS version is pinned here. Change both lines together if you need another release.
+     1.145 (2026-09-02) includes ITwinData/ITwinPlatform for Reality Management. The capture code relies on
+     Camera, clipping and tile-loading internals that were checked against the 1.121 and 1.145 sources. -->
+<link href="https://cesium.com/downloads/cesiumjs/releases/1.145/Build/Cesium/Widgets/widgets.css" rel="stylesheet">
+<script src="https://cesium.com/downloads/cesiumjs/releases/1.145/Build/Cesium/Cesium.js"></script>
+<!-- OAuth sign-in for iTwin (Apache-2.0). Exposes window.oidc. -->
+<script src="https://cdn.jsdelivr.net/npm/oidc-client-ts@3.5.0/dist/browser/oidc-client-ts.min.js"></script>
+<script src="./config.js"></script>
+<script src="./sources.js"></script>
+<!-- Bentley StrataKit design tokens (MIT), vendored from @stratakit/foundations. Dark scheme is set on <html>. -->
+<link href="./vendor/stratakit-tokens.css" rel="stylesheet">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* Layout and controls styled with StrataKit tokens (--stratakit-*). Local aliases keep the rules short. */
+  :root {
+    --bg-page: var(--stratakit-color-bg-page-depth);
+    --bg-panel: var(--stratakit-color-bg-page-base);
+    --bg-field: var(--stratakit-color-bg-control-textbox);
+    --bg-raised: var(--stratakit-color-bg-elevation-level-1);
+    --line: var(--stratakit-color-border-page-base);
+    --line-field: var(--stratakit-color-border-neutral-muted);
+    --text: var(--stratakit-color-text-neutral-primary);
+    --text-2: var(--stratakit-color-text-neutral-secondary);
+    --text-3: var(--stratakit-color-text-neutral-tertiary);
+    --accent: var(--stratakit-color-bg-accent-base);
+    --accent-line: var(--stratakit-color-border-accent-strong);
+    --bad: var(--stratakit-color-text-critical-base);
+    --r: var(--stratakit-radius-sm);
+    --font: "InterVariable", "Inter", var(--stratakit-font-family-sans);
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg-page); color: var(--text);
+    font: 400 var(--stratakit-font-size-body-sm)/var(--stratakit-line-height-body-sm) var(--font); }
+  #viewer { position: absolute; top: 0; bottom: 0; left: 340px; right: 0; }
+  #viewer.capturing { right: auto; bottom: auto; outline: 2px solid var(--accent-line); z-index: 5; }
+  /* Credits stay visible (Cesium ion attribution). They are HTML, so they never appear in captured rasters. */
+  #viewer.capturing .cesium-viewer-bottom { display: none; }
+
+  aside { position: absolute; top: 0; left: 0; bottom: 0; width: 340px; overflow-y: auto;
+    background: var(--bg-panel); border-right: 1px solid var(--line); padding: 20px 20px 88px; }
+  h1 { font: 600 var(--stratakit-font-size-headline-sm)/var(--stratakit-line-height-headline-sm) var(--font); margin: 0 0 4px; }
+  .lede { color: var(--text-2); margin: 0 0 16px; }
+  section { border-top: 1px solid var(--line); padding: 16px 0 8px; }
+  h2 { font: 600 var(--stratakit-font-size-body-md)/1.3 var(--font); margin: 0 0 10px; display: flex; gap: 8px; align-items: center; }
+  h2 .n { color: var(--stratakit-color-text-neutral-emphasis); background: var(--accent); border-radius: var(--stratakit-radius-round);
+    width: 20px; height: 20px; display: inline-grid; place-items: center; font-size: var(--stratakit-font-size-caption-md); flex: none; }
+  label { display: block; color: var(--text-2); margin: 10px 0 4px; }
+
+  /* Text boxes, selects and text areas (StrataKit TextBox and Select look) */
+  input[type=text], input[type=number], input[type=password], textarea, select {
+    width: 100%; min-height: 28px; background: var(--bg-field); color: var(--text); font: inherit;
+    border: 1px solid var(--line-field); border-radius: var(--r); padding: 4px 8px;
+    transition: border-color .15s ease-out; }
+  input:hover, textarea:hover, select:hover { border-color: var(--stratakit-color-border-neutral-base); }
+  input::placeholder, textarea::placeholder { color: var(--stratakit-color-text-neutral-placeholder); }
+  textarea { min-height: 90px; font-family: ui-monospace, Consolas, monospace; font-size: var(--stratakit-font-size-caption-lg); }
+  select { padding: 2px; }
+  select option { padding: 3px 6px; border-radius: 2px; }
+  select option:checked { background: var(--stratakit-color-bg-accent-muted); color: var(--text); }
+  :is(input, textarea, select, button, summary):focus-visible { outline: 2px solid var(--accent-line); outline-offset: 1px; }
+  input:focus-visible, textarea:focus-visible, select:focus-visible { border-color: var(--accent-line); outline-offset: 0; }
+
+  /* Number fields: native spinners replaced by a stepper (minus, value, plus) */
+  input[type=number] { appearance: textfield; -moz-appearance: textfield; text-align: center; }
+  input[type=number]::-webkit-inner-spin-button, input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  .stepper { display: grid; grid-template-columns: 24px 1fr 24px; align-items: stretch; border: 1px solid var(--line-field);
+    border-radius: var(--r); background: var(--bg-field); transition: border-color .15s ease-out; }
+  .stepper:hover { border-color: var(--stratakit-color-border-neutral-base); }
+  .stepper:focus-within { border-color: var(--accent-line); }
+  .stepper input[type=number] { border: 0; border-radius: 0; background: transparent; padding: 4px 0; min-width: 0; }
+  .stepper input[type=number]:focus-visible { outline: none; }
+  .stepper button { margin: 0; padding: 0; min-height: 0; border: 0; border-radius: 0; background: transparent;
+    color: var(--stratakit-color-icon-neutral-base); display: grid; place-items: center; }
+  .stepper button:first-child { border-radius: var(--r) 0 0 var(--r); }
+  .stepper button:last-child { border-radius: 0 var(--r) var(--r) 0; }
+  .stepper button:hover:not(:disabled) { background: var(--stratakit-color-bg-glow-on-surface-neutral-hover); color: var(--text); }
+  .stepper button:active:not(:disabled) { background: var(--stratakit-color-bg-glow-on-surface-neutral-pressed); }
+  .stepper button:focus-visible { outline-offset: -2px; }
+  .stepper svg { width: 12px; height: 12px; }
+
+  .row { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+
+  /* Buttons (StrataKit Button: neutral solid and accent solid) */
+  button { font: 500 var(--stratakit-font-size-body-sm)/1.2 var(--font); border-radius: var(--r); padding: 5px 11px; min-height: 28px;
+    cursor: pointer; border: 1px solid var(--stratakit-color-border-glow-strong-default); background: var(--stratakit-color-bg-neutral-base);
+    color: var(--text); margin: 10px 6px 0 0; transition: background-color .15s ease-out; }
+  button:hover:not(:disabled) { background: color-mix(in oklch, var(--stratakit-color-bg-neutral-base), var(--stratakit-color-glow-hue) 8%); }
+  button.primary { background: var(--accent); color: var(--stratakit-color-text-neutral-emphasis); }
+  button.primary:hover:not(:disabled) { background: color-mix(in oklch, var(--accent), var(--stratakit-color-glow-hue) 12%); }
+  button.active { box-shadow: inset 0 0 0 1px var(--accent-line); border-color: var(--accent-line); }
+  button:disabled { opacity: .45; cursor: default; }
+
+  details { margin-top: 10px; }
+  summary { cursor: pointer; color: var(--text-2); }
+  summary:hover { color: var(--text); }
+  .hint { color: var(--text-3); font-size: var(--stratakit-font-size-caption-lg); line-height: var(--stratakit-line-height-caption-lg); margin: 6px 0 0; }
+  ul.surfaces { list-style: none; padding: 0; margin: 8px 0 0; }
+  ul.surfaces li { border: 1px solid var(--line-field); border-radius: var(--stratakit-radius-md); padding: 8px 10px; margin-bottom: 6px; background: var(--bg-raised); }
+  ul.surfaces li.sel { border-color: var(--accent-line); }
+  ul.surfaces .name { font-weight: 600; }
+  ul.surfaces .meta { color: var(--text-2); font-size: var(--stratakit-font-size-caption-lg); }
+  ul.surfaces button { margin-top: 6px; padding: 3px 9px; min-height: 24px; }
+  .check { display: flex; gap: 8px; align-items: center; margin-top: 10px; color: var(--text-2); cursor: pointer; }
+  .check input { accent-color: var(--accent); width: 14px; height: 14px; margin: 0; }
+  #thumb { margin-top: 10px; max-width: 100%; display: none; border: 1px solid var(--line-field); border-radius: var(--r);
+    background: repeating-conic-gradient(var(--bg-raised) 0 25%, var(--bg-page) 0 50%) 0 0 / 16px 16px; }
+  #status { position: absolute; left: 0; bottom: 0; width: 340px; padding: 10px 20px; font-size: var(--stratakit-font-size-caption-lg);
+    background: var(--bg-raised); border-top: 1px solid var(--line); border-right: 1px solid var(--line); min-height: 40px; }
+  #status.err { color: var(--bad); }
+
+  /* Source tabs (StrataKit Tabs look: underline on the selected tab) */
+  .tabs { display: grid; grid-template-columns: repeat(4, 1fr); margin-bottom: 8px; border-bottom: 1px solid var(--line); }
+  .tabs button { margin: 0; padding: 6px 2px; min-height: 32px; border: 0; border-radius: var(--r) var(--r) 0 0; background: transparent;
+    color: var(--text-2); box-shadow: inset 0 -2px 0 transparent; }
+  .tabs button:hover:not(:disabled) { background: var(--stratakit-color-bg-glow-on-surface-neutral-hover); color: var(--text); }
+  .tabs button[aria-selected="true"] { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent-line); }
+  .panel[hidden] { display: none; }
+  .signed { color: var(--text-2); margin-top: 8px; }
+  @media (max-width: 760px) {
+    aside, #status { width: 100%; height: 50%; top: auto; }
+    aside { bottom: 0; }
+    #viewer { left: 0; bottom: 50%; }
+  }
+</style>
+</head>
+<body>
+<div id="viewer"></div>
+
+<aside>
+  <h1>Surface Ortho Capture</h1>
+  <p class="lede">Clip a 3D Tiles model to one surface and render a true orthographic raster at a set GSD.</p>
+
+  <section>
+    <h2><span class="n">1</span>Load the model</h2>
+    <div class="tabs" role="tablist" aria-label="Data source">
+      <button role="tab" id="tab-itwin" aria-controls="panel-itwin" data-src="itwin">iTwin</button>
+      <button role="tab" id="tab-ion" aria-controls="panel-ion" data-src="ion">Cesium ion</button>
+      <button role="tab" id="tab-local" aria-controls="panel-local" data-src="local">Local folder</button>
+      <button role="tab" id="tab-url" aria-controls="panel-url" data-src="url">URL</button>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-itwin" aria-labelledby="tab-itwin">
+      <button id="btnSignIn">Sign in with Bentley</button>
+      <button id="btnSignOut" hidden>Sign out</button>
+      <p class="signed" id="signedInfo">Not signed in.</p>
+      <label for="itwinSearch">Find an iTwin</label>
+      <div class="row" style="grid-template-columns: 1fr auto;">
+        <input id="itwinSearch" type="text" placeholder="Name or number (blank lists all)">
+        <button id="btnFindITwins" style="margin:0">Find</button>
+      </div>
+      <label for="itwinList">iTwin</label>
+      <select id="itwinList" size="5"></select>
+      <label for="rdList">Reality data (3D Tiles)</label>
+      <select id="rdList" size="6"></select>
+      <label class="check"><input type="checkbox" id="rdShowAll"> Show all reality data types</label>
+      <details>
+        <summary>Use a token instead</summary>
+        <label for="itwinToken">Access token (itwin-platform scope)</label>
+        <input id="itwinToken" type="password" autocomplete="off">
+        <div class="row">
+          <div><label for="itwinIdIn">iTwin ID</label><input id="itwinIdIn" type="text"></div>
+          <div><label for="rdIdIn">Reality data ID</label><input id="rdIdIn" type="text"></div>
+        </div>
+        <p class="hint">Tokens stay in this page's memory only. When both IDs are filled in, they are used instead of the lists above.</p>
+      </details>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-ion" aria-labelledby="tab-ion" hidden>
+      <div class="row">
+        <div><label for="ionId">Asset ID</label><input id="ionId" type="text" inputmode="numeric"></div>
+        <div><label for="ionToken">Access token</label><input id="ionToken" type="password" autocomplete="off"></div>
+      </div>
+      <p class="hint">The token stays in this page's memory only.</p>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-local" aria-labelledby="tab-local" hidden>
+      <button id="btnPickFolder">Choose folder</button>
+      <input id="folderInput" type="file" webkitdirectory multiple hidden>
+      <label for="rootList">Root document</label>
+      <select id="rootList" size="4"></select>
+      <p class="hint">Pick the folder that contains tileset.json. Files are read in this browser and are not uploaded.</p>
+    </div>
+
+    <div class="panel" role="tabpanel" id="panel-url" aria-labelledby="tab-url" hidden>
+      <label for="tilesetUrl">Tileset URL</label>
+      <input id="tilesetUrl" type="text" placeholder="./tiles/tileset.json">
+      <p class="hint">A path next to this page when it runs from a local server, or a full URL to tileset.json. A Reality Management read URL must include its SAS query.</p>
+    </div>
+
+    <button class="primary" id="btnLoad">Load model</button>
+  </section>
+
+  <section>
+    <h2><span class="n">2</span>Define a surface</h2>
+    <p class="hint">Click points around the edge of one flat face, in order. Three is the minimum. The plane is fitted through all of them.</p>
+    <label for="surfName">Name</label>
+    <input id="surfName" type="text" value="surface_1">
+    <div class="row3">
+      <div><label for="depthFront">In front (m)</label><input id="depthFront" type="number" min="0" step="0.05" value="0.30"></div>
+      <div><label for="depthBack">Behind (m)</label><input id="depthBack" type="number" min="0" step="0.05" value="0.30"></div>
+      <div><label for="margin">Margin (m)</label><input id="margin" type="number" min="0" step="0.05" value="0.10"></div>
+    </div>
+    <button id="btnPick">Pick points</button>
+    <button id="btnFinish" class="primary" disabled>Add surface</button>
+    <button id="btnClearPicks">Clear points</button>
+    <p class="hint" id="pickInfo">No points picked.</p>
+    <details>
+      <summary>Import or export surfaces as JSON</summary>
+      <textarea id="json" spellcheck="false" placeholder='[{"name":"wall_north","center":[x,y,z],"normal":[nx,ny,nz],"width":4.2,"height":7.5,"depthFront":0.3,"depthBack":0.3}]'></textarea>
+      <button id="btnImport">Import</button>
+      <button id="btnExport">Export list</button>
+      <p class="hint">Coordinates are ECEF metres. "centerLonLatHeight" in degrees and metres also works. "u" and "v" are optional.</p>
+    </details>
+  </section>
+
+  <section>
+    <h2><span class="n">3</span>Capture rasters</h2>
+    <div class="row3">
+      <div><label for="gsd">GSD (m/px)</label><input id="gsd" type="number" min="0.0005" step="0.0005" value="0.002"></div>
+      <div><label for="tileSize">Tile (px)</label><input id="tileSize" type="number" min="256" step="256" value="1024"></div>
+      <div><label for="sse">Max SSE</label><input id="sse" type="number" min="0.5" step="0.5" value="1"></div>
+    </div>
+    <label class="check"><input type="checkbox" id="clipPreview" checked> Clip the model to the selected surface</label>
+    <ul class="surfaces" id="list"></ul>
+    <p class="hint" id="emptyList">No surfaces yet. Pick one in step 2 or import a list.</p>
+    <button class="primary" id="btnCaptureAll" disabled>Capture all</button>
+    <button id="btnBack3d">Back to 3D view</button>
+    <img id="thumb" alt="Last captured raster">
+  </section>
+</aside>
+
+<div id="status">Load a 3D Tiles model to start.</div>
+
+<script>
+(() => {
+  "use strict";
+  const $ = (s) => document.querySelector(s);
+  const C = Cesium;
+
+  // ---------- Viewer ----------
+  const viewer = new C.Viewer("viewer", {
+    baseLayer: false, baseLayerPicker: false, geocoder: false, homeButton: false,
+    sceneModePicker: false, navigationHelpButton: false, animation: false, timeline: false,
+    fullscreenButton: false, infoBox: false, selectionIndicator: false, msaaSamples: 1,
+    // alpha so empty pixels export as transparent; preserveDrawingBuffer so the canvas can be copied
+    contextOptions: { webgl: { alpha: true, preserveDrawingBuffer: true } },
+  });
+  const scene = viewer.scene;
+  const camera = viewer.camera;
+  const BG = C.Color.fromCssColorString("#1b1c1f"); // close to --stratakit-color-bg-page-depth (dark)
+  scene.globe.show = false;
+  if (scene.skyBox) scene.skyBox.show = false;
+  if (scene.skyAtmosphere) scene.skyAtmosphere.show = false;
+  if (scene.sun) scene.sun.show = false;
+  if (scene.moon) scene.moon.show = false;
+  scene.fog.enabled = false;
+  scene.highDynamicRange = false;               // no tone mapping on texture colours
+  scene.postProcessStages.fxaa.enabled = false; // no anti-aliasing blur on exported pixels
+  scene.backgroundColor = BG;
+  viewer.useBrowserRecommendedResolution = true; // 1 CSS px = 1 drawing-buffer px
+  viewer.resolutionScale = 1;
+  const perspectiveFrustum = camera.frustum.clone();
+
+  const state = { tileset: null, picks: [], pickEntities: [], surfaces: [], selected: -1,
+                  picking: false, busy: false };
+
+  // ---------- UI helpers ----------
+  function status(msg, isErr) { const el = $("#status"); el.textContent = msg; el.classList.toggle("err", !!isErr); }
+  const num = (id) => parseFloat($(id).value);
+  const v3 = (a) => new C.Cartesian3(a[0], a[1], a[2]);
+  const arr = (c) => [c.x, c.y, c.z];
+  const add = (a, b) => C.Cartesian3.add(a, b, new C.Cartesian3());
+  const sub = (a, b) => C.Cartesian3.subtract(a, b, new C.Cartesian3());
+  const mul = (a, s) => C.Cartesian3.multiplyByScalar(a, s, new C.Cartesian3());
+  const cross = (a, b) => C.Cartesian3.cross(a, b, new C.Cartesian3());
+  const norm = (a) => C.Cartesian3.normalize(a, new C.Cartesian3());
+  const dot = C.Cartesian3.dot;
+
+  // Number fields get a stepper (minus, value, plus) instead of the browser's small spinners.
+  // Arrow keys in the field still step, so the buttons are skipped in the tab order.
+  const STEP_ICON = {
+    down: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M3 7.25h10v1.5H3z"/></svg>',
+    up: '<svg viewBox="0 0 16 16" aria-hidden="true"><path fill="currentColor" d="M7.25 3h1.5v4.25H13v1.5H8.75V13h-1.5V8.75H3v-1.5h4.25z"/></svg>',
+  };
+  document.querySelectorAll("input[type=number]").forEach((input) => {
+    const wrap = document.createElement("div");
+    wrap.className = "stepper";
+    input.replaceWith(wrap);
+    const name = document.querySelector(`label[for="${input.id}"]`)?.textContent || "value";
+    const mk = (up) => {
+      const b = document.createElement("button");
+      b.type = "button"; b.tabIndex = -1; b.innerHTML = up ? STEP_ICON.up : STEP_ICON.down;
+      b.setAttribute("aria-label", `${up ? "Increase" : "Decrease"} ${name}`);
+      b.onclick = () => {
+        up ? input.stepUp() : input.stepDown();
+        // Keep at least as many decimals as the default value, so 0.30 steps to 0.25 and 0.00, not 0.
+        const want = (input.defaultValue.split(".")[1] || "").length, have = (input.value.split(".")[1] || "").length;
+        if (have < want) input.value = (+input.value).toFixed(want);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+      };
+      return b;
+    };
+    wrap.append(mk(false), input, mk(true));
+  });
+
+  // ---------- 1. Load ----------
+  const S = window.OrthoSources;
+  const SourceError = S.SourceError;
+  let source = "itwin"; // active tab
+
+  // Turn a failed tileset.json request into "what failed" plus "how to fix it".
+  function describeLoadError(e, kind, url) {
+    if (e instanceof SourceError) return e;
+    const code = e?.statusCode;
+    const where = kind === "local" ? "in the picked folder" : kind === "ion" ? "on Cesium ion" : "on the server";
+    if (kind === "ion") {
+      if (code === 401) return new SourceError("Cesium ion rejected the token (401).", "Paste a valid ion access token that can read this asset.", e);
+      if (code === 404) return new SourceError("Cesium ion asset not found (404).", "Check the asset ID, and that the token's account owns or shares it.", e);
+    }
+    if (code === 403) {
+      return new SourceError("Storage refused the tileset request (403).",
+        kind === "itwin" || /[?&]sig=/.test(url || "") ? "The read link (SAS) may have expired. Load the model again to get a fresh one."
+                                                      : "Check that the URL is still valid and allows reading.", e);
+    }
+    if (code === 404) return new SourceError(`tileset.json was not found ${where} (404).`,
+      kind === "local" ? "Pick the folder that directly contains the root tileset.json, or choose another root document."
+                       : kind === "itwin" ? "The reality data's root document is missing from storage. Check that the iTwin Capture job finished."
+                                          : "Check the path. Relative paths only work when the page runs from a local server next to the tiles.", e);
+    if (code === 0 || (code === undefined && /request|network|fetch/i.test(e?.message || String(e)))) {
+      return new SourceError(`The tileset request ${where} was blocked or got no response.`,
+        "This is usually CORS on the storage or tile server. Check the browser console for the blocked URL.", e);
+    }
+    if (e instanceof SyntaxError || /JSON/i.test(e?.message || "")) {
+      return new SourceError("The root document is not valid JSON.", "Pick the 3D Tiles tileset.json, not another JSON file.", e);
+    }
+    return new SourceError(`Loading failed: ${e?.message || e}.`, "Check the browser console for details.", e);
+  }
+
+  // src: { url } | { ionId, ionToken } | { iTwinId, realityDataId, type?, rootDocument?, token? } | { local: rootDocument }
+  // Called with no argument from the UI: reads the active tab.
+  async function loadTileset(src) {
+    src = src ?? readSourceForm();
+    const kind = src.local !== undefined ? "local" : src.iTwinId || src.realityDataId ? "itwin"
+               : src.ionId ? "ion" : src.url ? "url" : null;
+    if (!kind) throw new SourceError("Nothing to load.", "Choose a data source and fill in its fields.");
+    if (state.tileset) { scene.primitives.remove(state.tileset); state.tileset = null; }
+    status("Loading model...");
+    let ts, url;
+    try {
+      if (kind === "ion") {
+        if (src.ionToken) C.Ion.defaultAccessToken = src.ionToken;
+        ts = await C.Cesium3DTileset.fromIonAssetId(Number(src.ionId));
+      } else if (kind === "itwin") {
+        if (src.token) S.itwin.setPastedToken(src.token);
+        ts = await S.itwin.createTileset(src);
+      } else if (kind === "local") {
+        url = S.local.localUrl(src.local);
+        ts = await C.Cesium3DTileset.fromUrl(url);
+      } else {
+        url = src.url;
+        ts = await C.Cesium3DTileset.fromUrl(url);
+      }
+    } catch (e) {
+      console.error(e);
+      throw describeLoadError(e, kind, url);
+    }
+    // Report tiles that fail after the root loaded (for example an expired SAS link on iTwin data).
+    ts.tileFailed.addEventListener((err) => {
+      console.warn("Tile failed:", err.url, err.message);
+      status(`Some tiles failed to load (${err.message}). ` +
+        (kind === "itwin" ? "The read link may have expired. Load the model again." : "Check the browser console."), true);
+    });
+    // Unlit so exported pixels are the source texture colours, not shaded colours.
+    ts.customShader = new C.CustomShader({ lightingModel: C.LightingModel.UNLIT });
+    scene.primitives.add(ts);
+    state.tileset = ts;
+    await viewer.zoomTo(ts);
+    status("Model loaded. Pick points on a flat face, or import surfaces.");
+    return ts;
+  }
+
+  // ---------- 2. Surfaces ----------
+  // A surface is an oriented box. Local frame: u = image right, v = image up, n = surface normal
+  // (toward the viewer). center lies on the surface plane. The box spans
+  // [-width/2, width/2] x [-height/2, height/2] x [-depthBack, depthFront].
+  function completeSurface(s) {
+    const out = { name: s.name || "surface", width: +s.width, height: +s.height,
+                  depthFront: +(s.depthFront ?? 0.3), depthBack: +(s.depthBack ?? 0.3) };
+    const center = s.centerLonLatHeight
+      ? C.Cartesian3.fromDegrees(s.centerLonLatHeight[0], s.centerLonLatHeight[1], s.centerLonLatHeight[2])
+      : v3(s.center);
+    const n = norm(v3(s.normal));
+    let u = s.u ? v3(s.u) : null;
+    if (!u) {
+      const up = C.Ellipsoid.WGS84.geodeticSurfaceNormal(center, new C.Cartesian3());
+      if (!up) throw new Error(`Surface "${out.name}" is too close to the Earth's centre. Is the tileset georeferenced?`);
+      u = cross(up, n);
+      if (C.Cartesian3.magnitude(u) < 1e-3) { // horizontal surface: use east as image right
+        const enu = C.Transforms.eastNorthUpToFixedFrame(center);
+        u = C.Matrix4.getColumn(enu, 0, new C.Cartesian4());
+        u = new C.Cartesian3(u.x, u.y, u.z);
+      }
+    }
+    // Always project u into the surface plane, so a supplied u that is slightly off still gives an orthonormal frame.
+    u = sub(u, mul(n, dot(u, n)));
+    if (C.Cartesian3.magnitude(u) < 1e-6) throw new Error(`Surface "${out.name}": u is parallel to the normal.`);
+    u = norm(u);
+    const v = norm(cross(n, u));
+    Object.assign(out, { center, u, v, n });
+    if (!(out.width > 0 && out.height > 0)) throw new Error(`Surface "${out.name}" needs a positive width and height.`);
+    return out;
+  }
+
+  function surfaceToJson(s) {
+    return { name: s.name, center: arr(s.center), u: arr(s.u), v: arr(s.v), normal: arr(s.n),
+             width: s.width, height: s.height, depthFront: s.depthFront, depthBack: s.depthBack };
+  }
+
+  function boxMatrix(s) {
+    const rot = new C.Matrix3();
+    C.Matrix3.setColumn(rot, 0, s.u, rot);
+    C.Matrix3.setColumn(rot, 1, s.v, rot);
+    C.Matrix3.setColumn(rot, 2, s.n, rot);
+    return { rot, m: C.Matrix4.fromRotationTranslation(rot, s.center) };
+  }
+
+  function surfaceFromPicks(points, name, depthFront, depthBack, margin) {
+    const centroid = mul(points.reduce((a, p) => add(a, p), new C.Cartesian3()), 1 / points.length);
+    // Newell's method: robust plane normal for an ordered ring of points.
+    let n = new C.Cartesian3();
+    for (let i = 0; i < points.length; i++) {
+      const a = sub(points[i], centroid), b = sub(points[(i + 1) % points.length], centroid);
+      n = add(n, cross(a, b));
+    }
+    if (C.Cartesian3.magnitude(n) < 1e-9) throw new Error("Points are collinear. Pick points around the face.");
+    n = norm(n);
+    if (dot(n, sub(camera.positionWC, centroid)) < 0) n = mul(n, -1); // face the current camera
+    const tmp = completeSurface({ name, center: arr(centroid), normal: arr(n), width: 1, height: 1 });
+    let umin = Infinity, umax = -Infinity, vmin = Infinity, vmax = -Infinity;
+    for (const p of points) {
+      const d = sub(p, centroid);
+      const pu = dot(d, tmp.u), pv = dot(d, tmp.v);
+      umin = Math.min(umin, pu); umax = Math.max(umax, pu); vmin = Math.min(vmin, pv); vmax = Math.max(vmax, pv);
+    }
+    const center = add(centroid, add(mul(tmp.u, (umin + umax) / 2), mul(tmp.v, (vmin + vmax) / 2)));
+    return completeSurface({ name, center: arr(center), normal: arr(tmp.n), u: arr(tmp.u),
+      width: umax - umin + 2 * margin, height: vmax - vmin + 2 * margin, depthFront, depthBack });
+  }
+
+  // ---------- Clipping ----------
+  function clipToSurface(s) {
+    const ts = state.tileset; if (!ts) return;
+    // Keep one collection per tileset and update it in place. Assigning a new collection destroys the
+    // old one and its texture, while tile models still hold a uniform closure over it
+    // (ModelClippingPlanesPipelineStage), which crashes rendering with "reading '_target'" in 1.121.
+    if (!ts.clippingPlanes) {
+      ts.clippingPlanes = new C.ClippingPlaneCollection({ unionClippingRegions: true, edgeWidth: 0, enabled: false });
+    }
+    const cp = ts.clippingPlanes;
+    if (!s) { cp.enabled = false; return; }
+    const hw = s.width / 2, hh = s.height / 2;
+    const planes = [
+      new C.ClippingPlane(new C.Cartesian3( 1, 0, 0), hw),
+      new C.ClippingPlane(new C.Cartesian3(-1, 0, 0), hw),
+      new C.ClippingPlane(new C.Cartesian3( 0, 1, 0), hh),
+      new C.ClippingPlane(new C.Cartesian3( 0,-1, 0), hh),
+      new C.ClippingPlane(new C.Cartesian3( 0, 0, 1), s.depthBack),
+      new C.ClippingPlane(new C.Cartesian3( 0, 0,-1), s.depthFront),
+    ];
+    // Tileset clipping planes live in the tileset's clipping origin frame. Convert box -> that frame.
+    // (The shader applies view * clippingPlanesOriginMatrix * modelMatrix; the getter always returns a matrix.)
+    const origin = ts.clippingPlanesOriginMatrix;
+    const modelMatrix = C.Matrix4.multiply(C.Matrix4.inverse(origin, new C.Matrix4()), boxMatrix(s).m, new C.Matrix4());
+    cp.removeAll();
+    planes.forEach((p) => cp.add(p));
+    cp.modelMatrix = modelMatrix;
+    cp.enabled = true;
+  }
+
+  // ---------- Drawing ----------
+  function drawSurfaces() {
+    for (const e of state.surfaceEntities || []) viewer.entities.remove(e);
+    state.surfaceEntities = state.surfaces.map((s, i) => {
+      const depth = s.depthFront + s.depthBack;
+      const pos = add(s.center, mul(s.n, (s.depthFront - s.depthBack) / 2));
+      const sel = i === state.selected;
+      return viewer.entities.add({
+        position: pos,
+        orientation: C.Quaternion.fromRotationMatrix(boxMatrix(s).rot),
+        box: { dimensions: new C.Cartesian3(s.width, s.height, depth),
+               material: C.Color.fromCssColorString("#F2C230").withAlpha(sel ? 0.18 : 0.08),
+               outline: true, outlineColor: C.Color.fromCssColorString(sel ? "#F2C230" : "#8A979C") },
+      });
+    });
+  }
+
+  function renderList() {
+    const list = $("#list");
+    list.innerHTML = "";
+    state.surfaces.forEach((s, i) => {
+      const li = document.createElement("li");
+      if (i === state.selected) li.className = "sel";
+      const gsd = num("#gsd");
+      const px = gsd > 0 ? `${Math.round(s.width / gsd)} x ${Math.round(s.height / gsd)} px` : "";
+      li.innerHTML = `<div class="name"></div><div class="meta">${s.width.toFixed(2)} x ${s.height.toFixed(2)} m, ${px}</div>`;
+      li.querySelector(".name").textContent = s.name;
+      const mk = (label, fn, primary) => { const b = document.createElement("button"); b.textContent = label;
+        if (primary) b.className = "primary"; b.onclick = fn; li.appendChild(b); return b; };
+      mk("View straight on", () => guard(() => previewSurface(i)));
+      mk("Capture", () => guard(() => captureAndDownload(i)), true);
+      mk("Remove", () => { if (state.busy) return; state.surfaces.splice(i, 1); if (state.selected >= state.surfaces.length) state.selected = -1;
+                           selectSurface(state.selected); });
+      list.appendChild(li);
+    });
+    $("#emptyList").style.display = state.surfaces.length ? "none" : "block";
+    $("#btnCaptureAll").disabled = !state.surfaces.length;
+  }
+
+  function selectSurface(i) {
+    state.selected = i;
+    clipToSurface($("#clipPreview").checked && i >= 0 ? state.surfaces[i] : null);
+    drawSurfaces(); renderList();
+  }
+
+  // ---------- Picking ----------
+  const handler = new C.ScreenSpaceEventHandler(scene.canvas);
+  handler.setInputAction((click) => {
+    if (!state.picking || state.busy) return;
+    if (!scene.pickPositionSupported) { status("This browser cannot read depth for picking.", true); return; }
+    const p = scene.pickPosition(click.position);
+    if (!C.defined(p)) { status("No model under the cursor. Click on the mesh.", true); return; }
+    state.picks.push(p);
+    state.pickEntities.push(viewer.entities.add({ position: p,
+      point: { pixelSize: 9, color: C.Color.fromCssColorString("#F2C230"),
+               outlineColor: C.Color.BLACK, outlineWidth: 1, disableDepthTestDistance: Number.POSITIVE_INFINITY } }));
+    updatePickInfo();
+  }, C.ScreenSpaceEventType.LEFT_CLICK);
+
+  function updatePickInfo() {
+    const k = state.picks.length;
+    $("#pickInfo").textContent = k ? `${k} point${k > 1 ? "s" : ""} picked.` : "No points picked.";
+    $("#btnFinish").disabled = k < 3;
+  }
+  function clearPicks() {
+    state.pickEntities.forEach((e) => viewer.entities.remove(e));
+    state.picks = []; state.pickEntities = []; updatePickInfo();
+  }
+  function setPicking(on) {
+    state.picking = on;
+    $("#btnPick").classList.toggle("active", on);
+    $("#btnPick").textContent = on ? "Stop picking" : "Pick points";
+    if (on) { // clipping and boxes would get in the way of picking the face
+      clipToSurface(null);
+      (state.surfaceEntities || []).forEach((e) => (e.show = false));
+      status("Click points around the edge of the face.");
+    } else {
+      (state.surfaceEntities || []).forEach((e) => (e.show = true));
+      selectSurface(state.selected);
+    }
+  }
+
+  // ---------- Camera ----------
+  // Place the camera by setting its vectors directly. camera.setView() and lookAtTransform() call
+  // Camera._adjustOrthographicFrustum(true), which overwrites an ortho frustum's width with the
+  // distance to the depth buffer (CesiumJS 1.121 Camera.js). setView also round-trips through
+  // heading/pitch/roll, which loses the heading for directions within ~2.6 deg of vertical.
+  // Call setOrtho() after this, never before.
+  function placeCamera(pos, dir, up) {
+    if (!C.Matrix4.equals(camera.transform, C.Matrix4.IDENTITY)) camera.lookAtTransform(C.Matrix4.IDENTITY);
+    C.Cartesian3.clone(pos, camera.position);
+    C.Cartesian3.normalize(dir, camera.direction);
+    C.Cartesian3.normalize(up, camera.up);
+    C.Cartesian3.cross(camera.direction, camera.up, camera.right);
+  }
+  function setOrtho(width) {
+    const f = new C.OrthographicFrustum();
+    f.width = width;
+    f.aspectRatio = scene.drawingBufferWidth / scene.drawingBufferHeight;
+    f.near = 0.01;
+    f.far = 1e5;
+    camera.frustum = f;
+  }
+  function backTo3d() {
+    camera.frustum = perspectiveFrustum.clone();
+    camera.frustum.aspectRatio = scene.drawingBufferWidth / scene.drawingBufferHeight;
+  }
+  function previewSurface(i) {
+    const s = state.surfaces[i];
+    selectSurface(i);
+    const aspect = scene.drawingBufferWidth / scene.drawingBufferHeight;
+    placeCamera(add(s.center, mul(s.n, s.depthFront + 5)), mul(s.n, -1), s.v);
+    setOrtho(Math.max(s.width, s.height * aspect) * 1.08);
+    status(`Orthographic view of ${s.name}. Use "Back to 3D view" to orbit again.`);
+  }
+
+  // ---------- 3. Capture ----------
+  function nextFrame() {
+    return new Promise((resolve) => {
+      const remove = scene.postRender.addEventListener(() => { remove(); resolve(); });
+      scene.requestRender();
+    });
+  }
+  async function waitForTiles(ts, timeoutMs = 120000) {
+    const t0 = performance.now(); let stable = 0;
+    while (stable < 3) {
+      await nextFrame();
+      stable = ts.tilesLoaded ? stable + 1 : 0;
+      if (performance.now() - t0 > timeoutMs) { console.warn("Tile loading timed out; capturing anyway."); return false; }
+    }
+    return true;
+  }
+
+  /**
+   * Render one surface to a raster.
+   * Returns { canvas, meta } where meta maps pixels back to ECEF:
+   *   pixel (x, y) centre = topLeft + u * (x + 0.5) * gsd - v * (y + 0.5) * gsd
+   */
+  async function captureSurface(input, opts = {}) {
+    const ts = state.tileset; if (!ts) throw new Error("Load a model first.");
+    const s = input.center instanceof C.Cartesian3 ? input : completeSurface(input);
+    const gsd = opts.gsd ?? num("#gsd");
+    const T = Math.round(opts.tileSize ?? num("#tileSize"));
+    const sse = opts.sse ?? num("#sse");
+    if (!(gsd > 0)) throw new Error("GSD must be greater than zero.");
+    const W = Math.max(1, Math.round(s.width / gsd)), H = Math.max(1, Math.round(s.height / gsd));
+    if (W > 16384 || H > 16384) throw new Error(`Raster would be ${W} x ${H} px. Increase the GSD or split the surface.`);
+    const wEff = W * gsd, hEff = H * gsd;
+
+    const out = document.createElement("canvas"); out.width = W; out.height = H;
+    const ctx = out.getContext("2d");
+
+    const saved = { sse: ts.maximumScreenSpaceError, dyn: ts.dynamicScreenSpaceError,
+                    fov: ts.foveatedScreenSpaceError, cull: ts.cullRequestsWhileMoving,
+                    inputs: scene.screenSpaceCameraController.enableInputs, frustum: camera.frustum.clone(),
+                    pos: C.Cartesian3.clone(camera.positionWC), dir: C.Cartesian3.clone(camera.directionWC),
+                    up: C.Cartesian3.clone(camera.upWC) };
+    const el = $("#viewer");
+    const timedOutTiles = [];
+    let maxEffectiveSse = 0;
+    try {
+      viewer.entities.show = false;
+      scene.screenSpaceCameraController.enableInputs = false; // stray mouse input would move the camera mid-capture
+      clipToSurface(s);
+      ts.maximumScreenSpaceError = sse;      // with an ortho camera, SSE is measured against gsd-sized pixels
+      ts.dynamicScreenSpaceError = false;
+      ts.foveatedScreenSpaceError = false;
+      // Tiles skipped by cull-while-moving are not counted as attempted requests, so tilesLoaded can
+      // read true for a frame or two after each camera jump. Turn it off so every needed tile is requested.
+      ts.cullRequestsWhileMoving = false;
+      scene.backgroundColor = C.Color.TRANSPARENT;
+      el.classList.add("capturing");
+      el.style.width = el.style.height = T + "px";
+      viewer.resize();
+      await nextFrame();
+      if (viewer.canvas.width !== T || viewer.canvas.height !== T) {
+        throw new Error(`Drawing buffer is ${viewer.canvas.width} x ${viewer.canvas.height}, expected ${T} x ${T}. ` +
+                        "Check browser zoom and resolution settings.");
+      }
+
+      const tx = Math.ceil(W / T), ty = Math.ceil(H / T);
+      const standoff = s.depthFront + 2;
+      for (let j = 0; j < ty; j++) {
+        for (let i = 0; i < tx; i++) {
+          opts.onProgress?.(j * tx + i + 1, tx * ty);
+          const uc = -wEff / 2 + (i * T + T / 2) * gsd;
+          const vc =  hEff / 2 - (j * T + T / 2) * gsd;
+          const pos = add(s.center, add(mul(s.u, uc), add(mul(s.v, vc), mul(s.n, standoff))));
+          placeCamera(pos, mul(s.n, -1), s.v);
+          setOrtho(T * gsd); // after placeCamera, so nothing can resize the frustum before this tile renders
+          if (!(await waitForTiles(ts, opts.timeoutMs))) timedOutTiles.push([i, j]);
+          // Cesium raises this above maximumScreenSpaceError when the tile cache is over budget (lower detail).
+          maxEffectiveSse = Math.max(maxEffectiveSse, ts.memoryAdjustedScreenSpaceError);
+          const cv = viewer.canvas;
+          ctx.drawImage(cv, 0, 0, cv.width, cv.height, i * T, j * T, T, T);
+        }
+      }
+    } finally {
+      el.classList.remove("capturing");
+      el.style.width = el.style.height = "";
+      viewer.resize();
+      ts.maximumScreenSpaceError = saved.sse;
+      ts.dynamicScreenSpaceError = saved.dyn;
+      ts.foveatedScreenSpaceError = saved.fov;
+      ts.cullRequestsWhileMoving = saved.cull;
+      scene.screenSpaceCameraController.enableInputs = saved.inputs;
+      scene.backgroundColor = BG;
+      viewer.entities.show = true;
+      placeCamera(saved.pos, saved.dir, saved.up);
+      camera.frustum = saved.frustum;
+      camera.frustum.aspectRatio = scene.drawingBufferWidth / scene.drawingBufferHeight;
+      selectSurface(state.selected);
+    }
+
+    const topLeft = add(s.center, add(mul(s.u, -wEff / 2), mul(s.v, hEff / 2)));
+    const complete = timedOutTiles.length === 0;
+    const meta = { name: s.name, gsd, widthPx: W, heightPx: H, widthM: wEff, heightM: hEff,
+      frame: { topLeft: arr(topLeft), u: arr(s.u), v: arr(s.v), normal: arr(s.n) },
+      pixelToEcef: "centre(x,y) = topLeft + u*(x+0.5)*gsd - v*(y+0.5)*gsd",
+      surface: surfaceToJson(s), maximumScreenSpaceError: sse,
+      maxEffectiveScreenSpaceError: maxEffectiveSse, // > maximumScreenSpaceError means detail was reduced for memory
+      complete, timedOutTiles, capturedAt: new Date().toISOString() };
+    return { canvas: out, meta };
+  }
+
+  function download(name, blob) {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob); a.download = name;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+  }
+  const safe = (n) => n.replace(/[^\w.-]+/g, "_");
+
+  async function captureAndDownload(i) {
+    const s = state.surfaces[i];
+    const { canvas, meta } = await captureSurface(s, {
+      onProgress: (k, total) => status(`Capturing ${s.name}: tile ${k} of ${total}...`) });
+    const blob = await new Promise((r) => canvas.toBlob(r, "image/png"));
+    download(`${safe(s.name)}.png`, blob);
+    download(`${safe(s.name)}.json`, new Blob([JSON.stringify(meta, null, 2)], { type: "application/json" }));
+    const thumb = $("#thumb"); thumb.src = canvas.toDataURL("image/png"); thumb.style.display = "block";
+    const warn = [];
+    if (!meta.complete) warn.push(`${meta.timedOutTiles.length} tile(s) timed out before loading finished`);
+    if (meta.maxEffectiveScreenSpaceError > meta.maximumScreenSpaceError + 1e-6)
+      warn.push(`detail was reduced for memory (effective SSE ${meta.maxEffectiveScreenSpaceError.toFixed(2)})`);
+    status(`Captured ${s.name}: ${meta.widthPx} x ${meta.heightPx} px at ${meta.gsd} m/px.` +
+           (warn.length ? ` Warning: ${warn.join("; ")}.` : ""), warn.length > 0);
+  }
+
+  async function guard(fn) {
+    if (state.busy) return;
+    state.busy = true;
+    document.querySelectorAll("button").forEach((b) => (b.dataset.wasDisabled = b.disabled, b.disabled = true));
+    try { await fn(); }
+    catch (e) { console.error(e); status(e.message || String(e), true); }
+    finally {
+      state.busy = false;
+      document.querySelectorAll("button").forEach((b) => (b.disabled = b.dataset.wasDisabled === "true"));
+      updatePickInfo(); renderList();
+    }
+  }
+
+  // ---------- Wiring ----------
+  $("#btnLoad").onclick = () => guard(() => loadTileset());
+  $("#btnPick").onclick = () => setPicking(!state.picking);
+  $("#btnClearPicks").onclick = clearPicks;
+  $("#btnFinish").onclick = () => guard(async () => {
+    const s = surfaceFromPicks(state.picks, $("#surfName").value.trim() || `surface_${state.surfaces.length + 1}`,
+      num("#depthFront"), num("#depthBack"), num("#margin"));
+    state.surfaces.push(s);
+    clearPicks(); setPicking(false);
+    $("#surfName").value = `surface_${state.surfaces.length + 1}`;
+    selectSurface(state.surfaces.length - 1);
+    status(`Added ${s.name}: ${s.width.toFixed(2)} x ${s.height.toFixed(2)} m.`);
+  });
+  $("#btnImport").onclick = () => guard(async () => {
+    const data = JSON.parse($("#json").value);
+    const list = (Array.isArray(data) ? data : [data]).map(completeSurface);
+    state.surfaces.push(...list);
+    selectSurface(state.surfaces.length - 1);
+    status(`Imported ${list.length} surface${list.length > 1 ? "s" : ""}.`);
+  });
+  $("#btnExport").onclick = () => { $("#json").value = JSON.stringify(state.surfaces.map(surfaceToJson), null, 2);
+    status("Surface list written to the JSON box."); };
+  $("#btnCaptureAll").onclick = () => guard(async () => {
+    for (let i = 0; i < state.surfaces.length; i++) { state.selected = i; await captureAndDownload(i); }
+  });
+  $("#btnBack3d").onclick = () => { backTo3d(); status("Back to the 3D view."); };
+  $("#clipPreview").onchange = () => selectSurface(state.selected);
+  $("#gsd").oninput = renderList;
+
+  // ---------- Data source UI ----------
+  function setSource(name) {
+    source = name;
+    document.querySelectorAll(".tabs [role=tab]").forEach((b) => {
+      const on = b.dataset.src === name;
+      b.setAttribute("aria-selected", on); b.tabIndex = on ? 0 : -1;
+      $(`#panel-${b.dataset.src}`).hidden = !on;
+    });
+  }
+  document.querySelectorAll(".tabs [role=tab]").forEach((b) => (b.onclick = () => setSource(b.dataset.src)));
+
+  const lists = { itwins: [], realityData: [] };
+  function fillSelect(sel, items, label) {
+    sel.innerHTML = "";
+    for (const it of items) { const o = document.createElement("option"); o.value = it.id; o.textContent = label(it); sel.appendChild(o); }
+  }
+  function refreshSignedInfo() {
+    const info = S.itwin.sessionInfo();
+    $("#btnSignOut").hidden = !info.signedIn;
+    $("#btnSignIn").hidden = info.signedIn && info.how === "Bentley account";
+    $("#signedInfo").textContent = info.signedIn
+      ? `Signed in (${info.how})${info.expiresAt ? `, token valid until ${info.expiresAt.toLocaleTimeString()}` : ""}.`
+      : info.configured ? "Not signed in."
+      : "Sign-in needs an iTwin client ID (config.js or ?clientId=). You can paste a token under \"Use a token instead\".";
+  }
+  async function findITwins() {
+    status("Listing iTwins...");
+    lists.itwins = await S.itwin.listITwins($("#itwinSearch").value.trim());
+    fillSelect($("#itwinList"), lists.itwins, (t) => `${t.displayName}${t.number && t.number !== t.displayName ? ` (${t.number})` : ""}`);
+    lists.realityData = []; fillSelect($("#rdList"), [], () => "");
+    status(lists.itwins.length ? `${lists.itwins.length} iTwin(s) found. Pick one.` : "No iTwins found for this account and search.", !lists.itwins.length);
+  }
+  async function listRealityData() {
+    const iTwinId = $("#itwinList").value; if (!iTwinId) return;
+    status("Listing reality data...");
+    lists.realityData = await S.itwin.listRealityData(iTwinId, $("#rdShowAll").checked);
+    fillSelect($("#rdList"), lists.realityData, (d) => `${d.displayName} [${d.type}]${d.loadable ? "" : " (not loadable)"}`);
+    status(lists.realityData.length ? `${lists.realityData.length} reality data item(s). Pick one and click Load model.`
+      : `No 3D Tiles reality data in this iTwin.${$("#rdShowAll").checked ? "" : " Tick \"Show all reality data types\" to see everything."}`,
+      !lists.realityData.length);
+  }
+  async function fillRoots() {
+    const roots = await S.local.findRootCandidates();
+    fillSelect($("#rootList"), roots.map((p) => ({ id: p })), (r) => r.id);
+    if (roots.length) $("#rootList").selectedIndex = 0;
+    status(roots.length ? `Folder "${S.local.name}": pick the root document and click Load model.`
+      : `No JSON file found in "${S.local.name}" or two levels below it. Pick the folder that contains tileset.json.`, !roots.length);
+  }
+
+  function readSourceForm() {
+    if (source === "ion") {
+      const ionId = $("#ionId").value.trim();
+      if (!ionId) throw new SourceError("No Cesium ion asset ID.", "Enter the asset ID and an access token.");
+      return { ionId, ionToken: $("#ionToken").value.trim() };
+    }
+    if (source === "url") {
+      const url = $("#tilesetUrl").value.trim();
+      if (!url) throw new SourceError("No tileset URL.", "Enter a path or URL to tileset.json.");
+      return { url };
+    }
+    if (source === "local") {
+      const root = $("#rootList").value;
+      if (!S.local.picked) throw new SourceError("No local folder picked.", "Click Choose folder first.");
+      if (!root) throw new SourceError("No root document selected.", "Pick tileset.json in the list.");
+      return { local: root };
+    }
+    // iTwin: typed IDs win over the lists.
+    S.itwin.setPastedToken($("#itwinToken").value);
+    const iTwinId = $("#itwinIdIn").value.trim(), realityDataId = $("#rdIdIn").value.trim();
+    if (iTwinId || realityDataId) return { iTwinId, realityDataId };
+    const rd = lists.realityData.find((d) => d.id === $("#rdList").value);
+    if (!rd) throw new SourceError("No reality data selected.", "Sign in, find an iTwin, then pick a reality data item.");
+    if (!rd.loadable) throw new SourceError(`"${rd.displayName}" is ${rd.type}, which is not a 3D Tiles model.`, "Pick an item of type Cesium3DTiles or RealityMesh3DTiles.");
+    return { iTwinId: $("#itwinList").value, realityDataId: rd.id, type: rd.type, rootDocument: rd.rootDocument };
+  }
+
+  $("#btnSignIn").onclick = () => guard(() => S.itwin.signIn());
+  $("#btnSignOut").onclick = () => { S.itwin.signOut(); $("#itwinToken").value = ""; refreshSignedInfo(); status("Signed out."); };
+  $("#itwinToken").onchange = () => { S.itwin.setPastedToken($("#itwinToken").value); refreshSignedInfo(); };
+  $("#btnFindITwins").onclick = () => guard(() => { S.itwin.setPastedToken($("#itwinToken").value); refreshSignedInfo(); return findITwins(); });
+  $("#itwinSearch").onkeydown = (e) => { if (e.key === "Enter") $("#btnFindITwins").click(); };
+  $("#itwinList").onchange = () => guard(listRealityData);
+  $("#rdShowAll").onchange = () => guard(listRealityData);
+  $("#btnPickFolder").onclick = () => {
+    if (!S.local.hasDirectoryPicker) { $("#folderInput").click(); return; } // Firefox, Safari: classic folder input
+    guard(async () => { await S.local.pickFolder(); await fillRoots(); });
+  };
+  $("#folderInput").onchange = () => guard(async () => { await S.local.useFileList($("#folderInput").files); await fillRoots(); });
+
+  // Register the local-folder Service Worker early, so it already controls the page when a folder is picked.
+  if ("serviceWorker" in navigator && window.isSecureContext) navigator.serviceWorker.register("./sw.js").catch(() => {});
+
+  // URL parameters: ?tileset=<url> preloads a model. ?ion=<assetId> prefills the ion asset ID.
+  // ?clientId=<id> sets the iTwin client ID (read in sources.js). Tokens are never read from the URL.
+  const qp = new URLSearchParams(location.search);
+  setSource("itwin");
+  refreshSignedInfo();
+  if (qp.get("ion")) { setSource("ion"); $("#ionId").value = qp.get("ion"); }
+  if (qp.get("tileset")) { setSource("url"); $("#tilesetUrl").value = qp.get("tileset"); guard(() => loadTileset()); }
+  else {
+    S.itwin.handleRedirect().then(({ handled, error }) => {
+      refreshSignedInfo();
+      if (!handled) return;
+      setSource("itwin");
+      if (error) { status(error.message, true); return; }
+      status("Signed in.");
+      guard(findITwins);
+    });
+  }
+
+  // Hook for headless batch runs (see README).
+  window.orthoCapture = {
+    viewer, loadTileset,
+    captureSurface: async (spec, opts) => {
+      const { canvas, meta } = await captureSurface(spec, opts);
+      return { pngDataUrl: canvas.toDataURL("image/png"), meta };
+    },
+  };
+  renderList();
+})();
+</script>
+</body>
+</html>
