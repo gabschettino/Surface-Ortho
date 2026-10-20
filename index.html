@@ -208,9 +208,12 @@
       <div><label for="depthBack">Behind (m)</label><input id="depthBack" type="number" min="0" step="0.05" value="0.30"></div>
       <div><label for="margin">Margin (m)</label><input id="margin" type="number" min="0" step="0.05" value="0.10"></div>
     </div>
+    <p class="hint">While picking, the box preview follows these values. With a surface selected and no points picked, they edit that surface.</p>
     <button id="btnPick">Pick points</button>
     <button id="btnFinish" class="primary" disabled>Add surface</button>
+    <button id="btnUndoPick" disabled>Undo point</button>
     <button id="btnClearPicks">Clear points</button>
+    <label class="check"><input type="checkbox" id="clipWhilePicking"> Preview the clip while picking</label>
     <p class="hint" id="pickInfo">No points picked.</p>
     <details>
       <summary>Import or export surfaces as JSON</summary>
@@ -393,8 +396,10 @@
   // (toward the viewer). center lies on the surface plane. The box spans
   // [-width/2, width/2] x [-height/2, height/2] x [-depthBack, depthFront].
   function completeSurface(s) {
+    // margin: how much of width and height (per side) is padding around the picked outline. Kept so the
+    // margin can be edited later. Imported surfaces without it have 0, so editing it grows the box from there.
     const out = { name: s.name || "surface", width: +s.width, height: +s.height,
-                  depthFront: +(s.depthFront ?? 0.3), depthBack: +(s.depthBack ?? 0.3) };
+                  depthFront: +(s.depthFront ?? 0.3), depthBack: +(s.depthBack ?? 0.3), margin: +(s.margin ?? 0) };
     const center = s.centerLonLatHeight
       ? C.Cartesian3.fromDegrees(s.centerLonLatHeight[0], s.centerLonLatHeight[1], s.centerLonLatHeight[2])
       : v3(s.center);
@@ -422,7 +427,7 @@
 
   function surfaceToJson(s) {
     return { name: s.name, center: arr(s.center), u: arr(s.u), v: arr(s.v), normal: arr(s.n),
-             width: s.width, height: s.height, depthFront: s.depthFront, depthBack: s.depthBack };
+             width: s.width, height: s.height, depthFront: s.depthFront, depthBack: s.depthBack, margin: s.margin };
   }
 
   function boxMatrix(s) {
@@ -453,7 +458,7 @@
     }
     const center = add(centroid, add(mul(tmp.u, (umin + umax) / 2), mul(tmp.v, (vmin + vmax) / 2)));
     return completeSurface({ name, center: arr(center), normal: arr(tmp.n), u: arr(tmp.u),
-      width: umax - umin + 2 * margin, height: vmax - vmin + 2 * margin, depthFront, depthBack });
+      width: umax - umin + 2 * margin, height: vmax - vmin + 2 * margin, depthFront, depthBack, margin });
   }
 
   // ---------- Clipping ----------
@@ -487,20 +492,84 @@
   }
 
   // ---------- Drawing ----------
+  // 3D overlay colours: a light StrataKit-style teal for the active item, grey for the rest.
+  const COL = { accent: C.Color.fromCssColorString("#3fc1a5"), muted: C.Color.fromCssColorString("#9aa3ad") };
+
+  function boxEntity(s, fillAlpha, outlineColor) {
+    return viewer.entities.add({
+      position: add(s.center, mul(s.n, (s.depthFront - s.depthBack) / 2)),
+      orientation: C.Quaternion.fromRotationMatrix(boxMatrix(s).rot),
+      box: { dimensions: new C.Cartesian3(s.width, s.height, s.depthFront + s.depthBack),
+             material: COL.accent.withAlpha(fillAlpha), outline: true, outlineColor },
+    });
+  }
+
   function drawSurfaces() {
     for (const e of state.surfaceEntities || []) viewer.entities.remove(e);
     state.surfaceEntities = state.surfaces.map((s, i) => {
-      const depth = s.depthFront + s.depthBack;
-      const pos = add(s.center, mul(s.n, (s.depthFront - s.depthBack) / 2));
       const sel = i === state.selected;
-      return viewer.entities.add({
-        position: pos,
-        orientation: C.Quaternion.fromRotationMatrix(boxMatrix(s).rot),
-        box: { dimensions: new C.Cartesian3(s.width, s.height, depth),
-               material: C.Color.fromCssColorString("#F2C230").withAlpha(sel ? 0.18 : 0.08),
-               outline: true, outlineColor: C.Color.fromCssColorString(sel ? "#F2C230" : "#8A979C") },
-      });
+      const e = boxEntity(s, sel ? 0.18 : 0.08, sel ? COL.accent : COL.muted);
+      e.show = !state.picking; // boxes would get in the way of picking
+      return e;
     });
+  }
+
+  // The surface the current picks would create with the current In front, Behind and Margin values.
+  function candidateSurface() {
+    if (state.picks.length < 3) return null;
+    try {
+      return surfaceFromPicks(state.picks, $("#surfName").value.trim() || "preview",
+        Math.max(0, num("#depthFront") || 0), Math.max(0, num("#depthBack") || 0), Math.max(0, num("#margin") || 0));
+    } catch { return null; } // collinear points: no plane yet
+  }
+
+  // Live preview while picking: the outline through the picked points, the fitted face, and the box.
+  function updatePickPreview() {
+    for (const e of state.previewEntities || []) viewer.entities.remove(e);
+    state.previewEntities = [];
+    const pts = state.picks;
+    const cand = candidateSurface();
+    if (pts.length >= 2) {
+      const ring = pts.length >= 3 ? [...pts, pts[0]] : pts;
+      state.previewEntities.push(viewer.entities.add({ polyline: {
+        positions: ring, width: 2, arcType: C.ArcType.NONE, material: COL.accent,
+        depthFailMaterial: COL.accent.withAlpha(0.45) } })); // stays visible where the mesh hides it
+    }
+    if (cand) {
+      // The face, projected onto the fitted plane and lifted 2 cm toward the viewer to avoid z-fighting.
+      const onPlane = pts.map((p) => add(sub(p, mul(cand.n, dot(sub(p, cand.center), cand.n))), mul(cand.n, 0.02)));
+      state.previewEntities.push(viewer.entities.add({ polygon: {
+        hierarchy: onPlane, perPositionHeight: true, arcType: C.ArcType.NONE, material: COL.accent.withAlpha(0.28) } }));
+      state.previewEntities.push(boxEntity(cand, 0.10, COL.accent));
+    }
+    // Optional clip to the candidate box. Off by default, because it hides the face beyond the current box.
+    if (state.picking && !state.busy) clipToSurface($("#clipWhilePicking").checked && cand ? cand : null);
+    const k = pts.length;
+    $("#pickInfo").textContent = !k ? "No points picked."
+      : cand ? `${k} points. Box ${cand.width.toFixed(2)} x ${cand.height.toFixed(2)} m, ${(cand.depthFront + cand.depthBack).toFixed(2)} m deep.`
+      : `${k} point${k > 1 ? "s" : ""} picked.${k >= 3 ? " They are in a line. Pick points around the face." : ""}`;
+    $("#btnFinish").disabled = !cand;
+    $("#btnUndoPick").disabled = !k;
+  }
+
+  // In front, Behind and Margin edit the selected surface when no points are being picked.
+  function applyOffsetsToSelected() {
+    const s = state.surfaces[state.selected];
+    if (!s || state.busy || state.picks.length) return;
+    const f = num("#depthFront"), b = num("#depthBack"), m = num("#margin");
+    if (![f, b, m].every((x) => x >= 0)) return; // ignore half-typed or negative values
+    const w = s.width - 2 * s.margin + 2 * m, h = s.height - 2 * s.margin + 2 * m;
+    if (!(w > 0 && h > 0)) return;
+    Object.assign(s, { width: w, height: h, margin: m, depthFront: f, depthBack: b });
+    selectSurface(state.selected);
+  }
+  // Select a surface and show its values in the offset fields.
+  function focusSurface(i) {
+    selectSurface(i);
+    const s = state.surfaces[i]; if (!s) return;
+    $("#depthFront").value = s.depthFront.toFixed(2);
+    $("#depthBack").value = s.depthBack.toFixed(2);
+    $("#margin").value = s.margin.toFixed(2);
   }
 
   function renderList() {
@@ -513,6 +582,8 @@
       const px = gsd > 0 ? `${Math.round(s.width / gsd)} x ${Math.round(s.height / gsd)} px` : "";
       li.innerHTML = `<div class="name"></div><div class="meta">${s.width.toFixed(2)} x ${s.height.toFixed(2)} m, ${px}</div>`;
       li.querySelector(".name").textContent = s.name;
+      li.title = "Click to select. In front, Behind and Margin then edit this surface.";
+      li.onclick = (e) => { if (!state.busy && !state.picking && e.target.tagName !== "BUTTON") focusSurface(i); };
       const mk = (label, fn, primary) => { const b = document.createElement("button"); b.textContent = label;
         if (primary) b.className = "primary"; b.onclick = fn; li.appendChild(b); return b; };
       mk("View straight on", () => guard(() => previewSurface(i)));
@@ -540,28 +611,30 @@
     if (!C.defined(p)) { status("No model under the cursor. Click on the mesh.", true); return; }
     state.picks.push(p);
     state.pickEntities.push(viewer.entities.add({ position: p,
-      point: { pixelSize: 9, color: C.Color.fromCssColorString("#F2C230"),
+      point: { pixelSize: 9, color: COL.accent,
                outlineColor: C.Color.BLACK, outlineWidth: 1, disableDepthTestDistance: Number.POSITIVE_INFINITY } }));
     updatePickInfo();
   }, C.ScreenSpaceEventType.LEFT_CLICK);
 
-  function updatePickInfo() {
-    const k = state.picks.length;
-    $("#pickInfo").textContent = k ? `${k} point${k > 1 ? "s" : ""} picked.` : "No points picked.";
-    $("#btnFinish").disabled = k < 3;
-  }
+  function updatePickInfo() { updatePickPreview(); }
   function clearPicks() {
     state.pickEntities.forEach((e) => viewer.entities.remove(e));
     state.picks = []; state.pickEntities = []; updatePickInfo();
+  }
+  function undoPick() {
+    if (!state.picks.length) return;
+    state.picks.pop();
+    viewer.entities.remove(state.pickEntities.pop());
+    updatePickInfo();
   }
   function setPicking(on) {
     state.picking = on;
     $("#btnPick").classList.toggle("active", on);
     $("#btnPick").textContent = on ? "Stop picking" : "Pick points";
-    if (on) { // clipping and boxes would get in the way of picking the face
-      clipToSurface(null);
+    if (on) { // the selected surface's clip and the saved boxes would get in the way of picking the face
       (state.surfaceEntities || []).forEach((e) => (e.show = false));
-      status("Click points around the edge of the face.");
+      updatePickPreview(); // applies the preview clip if it is switched on
+      status("Click points around the edge of the face. The preview follows In front, Behind and Margin.");
     } else {
       (state.surfaceEntities || []).forEach((e) => (e.show = true));
       selectSurface(state.selected);
@@ -595,7 +668,7 @@
   }
   function previewSurface(i) {
     const s = state.surfaces[i];
-    selectSurface(i);
+    focusSurface(i);
     const aspect = scene.drawingBufferWidth / scene.drawingBufferHeight;
     placeCamera(add(s.center, mul(s.n, s.depthFront + 5)), mul(s.n, -1), s.v);
     setOrtho(Math.max(s.width, s.height * aspect) * 1.08);
@@ -752,20 +825,27 @@
   $("#btnLoad").onclick = () => guard(() => loadTileset());
   $("#btnPick").onclick = () => setPicking(!state.picking);
   $("#btnClearPicks").onclick = clearPicks;
+  $("#btnUndoPick").onclick = undoPick;
+  $("#clipWhilePicking").onchange = updatePickPreview;
+  // Offsets: live box preview while points are picked, otherwise they edit the selected surface.
+  for (const id of ["#depthFront", "#depthBack", "#margin"]) {
+    $(id).addEventListener("input", () => (state.picks.length ? updatePickPreview() : applyOffsetsToSelected()));
+  }
+  $("#surfName").addEventListener("input", () => state.picks.length && updatePickPreview());
   $("#btnFinish").onclick = () => guard(async () => {
     const s = surfaceFromPicks(state.picks, $("#surfName").value.trim() || `surface_${state.surfaces.length + 1}`,
       num("#depthFront"), num("#depthBack"), num("#margin"));
     state.surfaces.push(s);
     clearPicks(); setPicking(false);
     $("#surfName").value = `surface_${state.surfaces.length + 1}`;
-    selectSurface(state.surfaces.length - 1);
+    focusSurface(state.surfaces.length - 1);
     status(`Added ${s.name}: ${s.width.toFixed(2)} x ${s.height.toFixed(2)} m.`);
   });
   $("#btnImport").onclick = () => guard(async () => {
     const data = JSON.parse($("#json").value);
     const list = (Array.isArray(data) ? data : [data]).map(completeSurface);
     state.surfaces.push(...list);
-    selectSurface(state.surfaces.length - 1);
+    focusSurface(state.surfaces.length - 1);
     status(`Imported ${list.length} surface${list.length > 1 ? "s" : ""}.`);
   });
   $("#btnExport").onclick = () => { $("#json").value = JSON.stringify(state.surfaces.map(surfaceToJson), null, 2);

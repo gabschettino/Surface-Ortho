@@ -93,7 +93,9 @@ The folder dialog uses `showDirectoryPicker`, which only Chromium browsers suppo
 
 ## Workflow in the page
 
-Load a model in step 1. In step 2 click "Pick points" and click around the edge of one flat face in order. Click "Add surface". The plane is fitted through all points, and the normal faces the camera you picked from. "In front", "Behind" and "Margin" set the box size around the face.
+Load a model in step 1. In step 2 click "Pick points" and click around the edge of one flat face in order. The page draws the outline through your points as you go. From the third point it also shows the fitted face and the box that will be created. "In front", "Behind" and "Margin" set the box size around the face, and the preview follows them as you change them. Tick "Preview the clip while picking" to see only the part of the model inside the box. Leave it off while you still need to click outside the box. "Undo point" removes the last point. Click "Add surface" when the box looks right. The plane is fitted through all points, and the normal faces the camera you picked from.
+
+To adjust a surface later, click it in the list in step 3. "In front", "Behind" and "Margin" then edit that surface, and its box and clip update right away.
 
 In step 3, "View straight on" shows the orthographic framing. "Capture" downloads `<name>.png` and `<name>.json`. Empty pixels are transparent in the PNG. The status line turns red if any capture tile timed out or if CesiumJS reduced detail to save memory. The JSON sidecar records both cases in `complete`, `timedOutTiles` and `maxEffectiveScreenSpaceError`.
 
